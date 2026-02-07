@@ -25,8 +25,9 @@ apply plugin: 'com.android.library'
 import org.apache.tools.ant.taskdefs.condition.Os
 
 android {
+    namespace = "com.serenegiant.uvccamera"
 	compileSdkVersion versionCompiler
-	buildToolsVersion versionBuildTool
+//	buildToolsVersion versionBuildTool
 
 	compileOptions {
 		sourceCompatibility javaSourceCompatibility
@@ -41,7 +42,7 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.txt'
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.txt'
         }
     }
 	sourceSets {
@@ -86,8 +87,8 @@ clean.dependsOn 'ndkClean'
 dependencies {
     implementation fileTree(dir: new File(buildDir, 'libs'), include: '*.jar')
 
-	implementation "com.android.support:support-v4:${supportLibVersion}"
-	implementation "com.android.support:support-annotations:${supportLibVersion}"
+	implementation "androidx.legacy:legacy-support-v4:1.0.0"
+	implementation "androidx.annotation:annotation:1.7.1"
 
 	implementation("com.serenegiant:common:${commonLibVersion}") {
 		exclude module: 'support-v4'
