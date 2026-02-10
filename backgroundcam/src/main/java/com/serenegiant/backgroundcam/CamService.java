@@ -115,52 +115,53 @@ public class CamService extends Service {
         }
 
         public void onSurfaceTextureUpdated(SurfaceTexture texture) {
+            // OPTIMIZATION: Get a tiny version of the bitmap (16x12 pixels).
+            // This is much faster than processing a full 1080p image.
+            Bitmap bitmap = textureView.getBitmap(16, 12);
+            if (bitmap == null) return;
 
-            Bitmap bitmap = textureView.getBitmap();
+            long sumRed = 0;
+            long sumGreen = 0;
+            long sumBlue = 0;
 
-            int overall = 0;
-            int height = bitmap.getHeight();
             int width = bitmap.getWidth();
-            int n = 0;
-            int[] pixels = new int[width * height];
+            int height = bitmap.getHeight();
+            int n = width * height;
+            int[] pixels = new int[n];
+
             bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
-            for (int i = 0; i < pixels.length; i += 20) {
-                int color = pixels[i];
-                overall += Color.red(color);
-                overall += Color.green(color);
-                overall += Color.blue(color);
-                n++;
+
+            for (int color : pixels) {
+                sumRed += Color.red(color);
+                sumGreen += Color.green(color);
+                sumBlue += Color.blue(color);
             }
-            int average = overall / (3 * n);
-//            Log.v(TAG, "average = " + average);
 
+            // Clean up bitmap memory immediately
+            bitmap.recycle();
 
-            int threshold = 16;
-            if (average <= threshold && visible) {
-                Log.v(TAG, "------ Invisible ------");
+            // Calculate averages
+            int avgR = (int) (sumRed / n);
+            int avgG = (int) (sumGreen / n);
+            int avgB = (int) (sumBlue / n);
 
-//                ViewGroup.LayoutParams params = textureView.getLayoutParams();
-//                params.width = 1;
-//                textureView.requestLayout();
+            // BLUE DETECTION LOGIC:
+            // A "Blue Screen" usually means Blue is very high,
+            // and both Red and Green are very low.
+            boolean isBlueDetected = (avgB > 100) && (avgB > avgR * 2) && (avgB > avgG * 2);
 
+            WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
 
-
-                WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+            // If it's blue, we want to HIDE the overlay (Invisible)
+            if (isBlueDetected && visible) {
+                Log.v(TAG, "------ Blue Screen Detected (Signal Lost) -> Hiding ------");
                 wm.updateViewLayout(rootView, invisibleParams);
-
                 visible = false;
             }
-            else if (average > threshold && !visible) {
-                Log.v(TAG, "------ Visible ------");
-
-//                ViewGroup.LayoutParams params = textureView.getLayoutParams();
-//                params.width = 1080;
-//                textureView.requestLayout();
-
-
-                WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+            // If it's NOT blue (actual video signal), we SHOW the overlay (Visible)
+            else if (!isBlueDetected && !visible) {
+                Log.v(TAG, "------ Signal Found (Not Blue) -> Showing ------");
                 wm.updateViewLayout(rootView, visibleParams);
-
                 visible = true;
             }
         }
@@ -183,8 +184,8 @@ public class CamService extends Service {
         );
 
         visibleParams = new WindowManager.LayoutParams(
+                1920,
                 1080,
-                810,
                 0,
                 -810,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,

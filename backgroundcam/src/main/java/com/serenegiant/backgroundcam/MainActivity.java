@@ -89,39 +89,46 @@ public final class MainActivity extends Activity {
 	int CODE_PERM_SYSTEM_ALERT_WINDOW = 6111;
 	int CODE_PERM_CAMERA = 6112;
 
+    // Add a new constant for the request code
+    int CODE_PERM_AUDIO = 6113;
 
+    @Override
+    protected void onCreate(final Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        Log.v(TAG, "onCreate");
 
-	@Override
-	protected void onCreate(final Bundle savedInstanceState) {
-		super.onCreate(savedInstanceState);
-		Log.v(TAG, "onCreate");
-//		setContentView(R.layout.activity_main);
-//		getActionBar().hide();
-		Log.v(TAG, "onCreate");
+        // Define the permissions we need
+        String[] permissions = {
+                Manifest.permission.CAMERA,
+                Manifest.permission.RECORD_AUDIO
+        };
 
+        // Check if we have both permissions
+        boolean hasCamera = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
+        boolean hasAudio = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
 
-		String permission = Manifest.permission.CAMERA;
-		if (ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) {
-			// We don't have camera permission yet. Request it from the user.
-			ActivityCompat.requestPermissions(this, new String[]{permission}, CODE_PERM_CAMERA);
-		}
+        if (!hasCamera || !hasAudio) {
+            // Request missing permissions
+            ActivityCompat.requestPermissions(this, permissions, CODE_PERM_CAMERA);
+        }
 
-
-		if (!Settings.canDrawOverlays((Context)MainActivity.this)) {
-			Intent settingsIntent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION);
-			startActivityForResult(settingsIntent, CODE_PERM_SYSTEM_ALERT_WINDOW);
-		}
-		else {
-
-			if (!isServiceRunning((Context) MainActivity.this, CamService.class)) {
-				Intent intent = new Intent((Context) this, CamService.class);
-				startService(intent);
-			} else
-				stopService(new Intent(this, CamService.class));
-			finish();
-		}
-
-	}
+        // Handle Overlay permission and Service start
+        if (!Settings.canDrawOverlays((Context)MainActivity.this)) {
+            Intent settingsIntent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION);
+            startActivityForResult(settingsIntent, CODE_PERM_SYSTEM_ALERT_WINDOW);
+        } else {
+            // Only start the service if we have the necessary runtime permissions
+            if (hasCamera && hasAudio) {
+                if (!isServiceRunning((Context) MainActivity.this, CamService.class)) {
+                    Intent intent = new Intent((Context) this, CamService.class);
+                    startService(intent);
+                } else {
+                    stopService(new Intent(this, CamService.class));
+                }
+                finish();
+            }
+        }
+    }
 
 	@Override
 	protected void onStart() {
