@@ -116,7 +116,6 @@ public class CamService extends Service {
 
         public void onSurfaceTextureUpdated(SurfaceTexture texture) {
             // OPTIMIZATION: Get a tiny version of the bitmap (16x12 pixels).
-            // This is much faster than processing a full 1080p image.
             Bitmap bitmap = textureView.getBitmap(16, 12);
             if (bitmap == null) return;
 
@@ -140,27 +139,27 @@ public class CamService extends Service {
             // Clean up bitmap memory immediately
             bitmap.recycle();
 
-            // Calculate averages
-            int avgR = (int) (sumRed / n);
-            int avgG = (int) (sumGreen / n);
-            int avgB = (int) (sumBlue / n);
+            // Calculate the overall average brightness
+            // We divide by (3 * n) because there are 3 color channels per pixel
+            int averageBrightness = (int) ((sumRed + sumGreen + sumBlue) / (3 * n));
 
-            // BLUE DETECTION LOGIC:
-            // A "Blue Screen" usually means Blue is very high,
-            // and both Red and Green are very low.
-            boolean isBlueDetected = (avgB > 100) && (avgB > avgR * 2) && (avgB > avgG * 2);
+            // BLACK DETECTION LOGIC:
+            // 0 is pure black, 255 is pure white.
+            // 16-20 is a good threshold for "black" to account for sensor noise.
+            int threshold = 16;
+            boolean isBlackDetected = (averageBrightness <= threshold);
 
             WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
 
-            // If it's blue, we want to HIDE the overlay (Invisible)
-            if (isBlueDetected && visible) {
-                Log.v(TAG, "------ Blue Screen Detected (Signal Lost) -> Hiding ------");
+            // If it's black (Signal Lost/Lens Covered), we HIDE the overlay
+            if (isBlackDetected && visible) {
+                Log.v(TAG, "------ Black Screen Detected (No Signal) -> Hiding ------");
                 wm.updateViewLayout(rootView, invisibleParams);
                 visible = false;
             }
-            // If it's NOT blue (actual video signal), we SHOW the overlay (Visible)
-            else if (!isBlueDetected && !visible) {
-                Log.v(TAG, "------ Signal Found (Not Blue) -> Showing ------");
+            // If it's NOT black (Valid Video), we SHOW the overlay
+            else if (!isBlackDetected && !visible) {
+                Log.v(TAG, "------ Light Detected (Signal Found) -> Showing ------");
                 wm.updateViewLayout(rootView, visibleParams);
                 visible = true;
             }
