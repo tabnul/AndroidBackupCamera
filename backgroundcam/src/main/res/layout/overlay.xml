@@ -5,11 +5,11 @@
     android:layout_height="810px">
 
 
-    <TextureView android:id="@+id/texPreview"
-        android:layout_width="1080px"
-        android:layout_height="810px"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintStart_toStartOf="parent"/>
+    <TextureView
+        android:id="@+id/texPreview"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_centerInParent="true" />
 
 
 </androidx.constraintlayout.widget.ConstraintLayout>

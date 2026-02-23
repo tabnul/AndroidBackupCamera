@@ -8,6 +8,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
@@ -104,7 +105,17 @@ public class CamService extends Service {
     private TextureView.SurfaceTextureListener surfaceTextureListener = new TextureView.SurfaceTextureListener() {
 
         public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
-//            initCam(width, height);
+            // ... (Your existing Aspect Ratio code) ...
+
+            // FORCE initial visibility check
+            WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+            wm.updateViewLayout(rootView, visibleParams);
+            visible = true;
+
+            // Start the camera handler after layout is set
+            if (textureView.getSurfaceTexture() != null) {
+                cameraHandler.startPreview(new Surface(textureView.getSurfaceTexture()));
+            }
         }
 
         public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {
@@ -182,15 +193,20 @@ public class CamService extends Service {
                 PixelFormat.OPAQUE
         );
 
+        // ... (existing invisibleParams) ...
+
         visibleParams = new WindowManager.LayoutParams(
-                1920,
-                1080,
-                0,
-                -810,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                        | WindowManager.LayoutParams.FLAG_FULLSCREEN,
                 PixelFormat.TRANSPARENT
         );
+
+        // Force Landscape
+        visibleParams.screenOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE;
 
 
         mUSBMonitor = new LibUVCCameraUSBMonitor(this, mOnDeviceConnectListener);
@@ -229,26 +245,23 @@ public class CamService extends Service {
 
 
     private void initOverlay() {
-
         Log.v(TAG, "init overlay");
 
-        LayoutInflater li = (LayoutInflater) this.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
-        rootView = li.inflate(R.layout.overlay, null);
+        LayoutInflater li = (LayoutInflater) this.getSystemService(Context.LAYOUT_INFLATER_SERVICE);    rootView = li.inflate(R.layout.overlay, null);
         textureView = rootView.findViewById(R.id.texPreview);
+
+        // This ensures the TextureView maintains its aspect ratio within the fullscreen layout
+        // Center it in the parent container
+        RelativeLayout.LayoutParams lp = new RelativeLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT);
+        lp.addRule(RelativeLayout.CENTER_IN_PARENT);
+        textureView.setLayoutParams(lp);
+
         textureView.setSurfaceTextureListener(surfaceTextureListener);
 
-//        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-//                1080,
-//                810,
-//                0,
-//                -810,
-//                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-//                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-//                PixelFormat.OPAQUE
-//        );
-//        params.alpha = 0.5f;
-
         WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+        // Add with invisibleParams initially
         wm.addView(rootView, invisibleParams);
     }
 
