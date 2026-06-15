@@ -41,6 +41,7 @@ import android.hardware.Camera;
 import android.hardware.usb.UsbDevice;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -84,10 +85,10 @@ import java.util.List;
 import java.util.Random;
 
 public final class MainActivity extends Activity {
-	private static final String TAG = "MainActivity";
+    private static final String TAG = "MainActivity";
 
-	int CODE_PERM_SYSTEM_ALERT_WINDOW = 6111;
-	int CODE_PERM_CAMERA = 6112;
+    int CODE_PERM_SYSTEM_ALERT_WINDOW = 6111;
+    int CODE_PERM_CAMERA = 6112;
 
     // Add a new constant for the request code
     int CODE_PERM_AUDIO = 6113;
@@ -96,80 +97,105 @@ public final class MainActivity extends Activity {
     protected void onCreate(final Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         Log.v(TAG, "onCreate");
+        proceed();
+    }
 
-        // Define the permissions we need
-        String[] permissions = {
-                Manifest.permission.CAMERA,
-                Manifest.permission.RECORD_AUDIO
-        };
-
-        // Check if we have both permissions
+    /**
+     * Acquires what the service needs, starts it, then finishes immediately so that
+     * no activity window lingers. The only thing left running afterwards is the
+     * background (notification-only) foreground service; the overlay appears on its
+     * own once the USB camera is connected and a signal is detected.
+     *
+     * CAMERA is required for the UVC stack. RECORD_AUDIO is requested opportunistically
+     * but never blocks startup -- a reversing camera has no audio.
+     */
+    private void proceed() {
         boolean hasCamera = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
-        boolean hasAudio = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
-
-        if (!hasCamera || !hasAudio) {
-            // Request missing permissions
-            ActivityCompat.requestPermissions(this, permissions, CODE_PERM_CAMERA);
+        if (!hasCamera) {
+            ActivityCompat.requestPermissions(this,
+                    new String[]{Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO},
+                    CODE_PERM_CAMERA);
+            return; // continues in onRequestPermissionsResult
         }
 
-        // Handle Overlay permission and Service start
-        if (!Settings.canDrawOverlays((Context)MainActivity.this)) {
-            Intent settingsIntent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION);
-            startActivityForResult(settingsIntent, CODE_PERM_SYSTEM_ALERT_WINDOW);
-        } else {
-            // Only start the service if we have the necessary runtime permissions
-            if (hasCamera && hasAudio) {
-                if (!isServiceRunning((Context) MainActivity.this, CamService.class)) {
-                    Intent intent = new Intent((Context) this, CamService.class);
-                    startService(intent);
-                } else {
-                    stopService(new Intent(this, CamService.class));
-                }
+        if (!Settings.canDrawOverlays((Context) this)) {
+            startActivityForResult(
+                    new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())),
+                    CODE_PERM_SYSTEM_ALERT_WINDOW);
+            return; // continues in onActivityResult
+        }
+
+        ContextCompat.startForegroundService(this, new Intent((Context) this, CamService.class));
+        finish();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == CODE_PERM_CAMERA) {
+            boolean hasCamera = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
+            if (hasCamera) {
+                proceed();
+            } else {
+                Log.w(TAG, "Camera permission denied; cannot start service.");
                 finish();
             }
         }
     }
 
-	@Override
-	protected void onStart() {
-		super.onStart();
-		Log.v(TAG, "onStart");
-	}
-	@Override
-	protected void onResume() {
-		super.onResume();
-		Log.v(TAG, "onResume");
-	}
-	@Override
-	protected void onPause() {
-		super.onPause();
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == CODE_PERM_SYSTEM_ALERT_WINDOW) {
+            if (Settings.canDrawOverlays((Context) this)) {
+                proceed();
+            } else {
+                Log.w(TAG, "Overlay permission not granted; cannot start service.");
+                finish();
+            }
+        }
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        Log.v(TAG, "onStart");
+    }
+    @Override
+    protected void onResume() {
+        super.onResume();
+        Log.v(TAG, "onResume");
+    }
+    @Override
+    protected void onPause() {
+        super.onPause();
 //		mCameraHandler.stopPreview();
-		Log.v(TAG, "onPause");
-	}
+        Log.v(TAG, "onPause");
+    }
 
 
-	@Override
-	protected void onDestroy() {
-		super.onDestroy();
-		Log.v(TAG, "onDestroy");
-	}
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        Log.v(TAG, "onDestroy");
+    }
 
 
 
 
-	public boolean isServiceRunning(Context context, Class serviceClass) {
-		try {
-			ActivityManager manager = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
-			for (RunningServiceInfo service : manager.getRunningServices(Integer.MAX_VALUE)) {
-				if (serviceClass.getName().equals(service.service.getClassName())) {
-					return true;
-				}
-			}
-		} catch (Exception e) {
-			e.printStackTrace();
-		}
-		return false;
-	}
+    public boolean isServiceRunning(Context context, Class serviceClass) {
+        try {
+            ActivityManager manager = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
+            for (RunningServiceInfo service : manager.getRunningServices(Integer.MAX_VALUE)) {
+                if (serviceClass.getName().equals(service.service.getClassName())) {
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
 
 
 }

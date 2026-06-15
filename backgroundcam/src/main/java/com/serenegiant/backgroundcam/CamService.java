@@ -25,6 +25,7 @@ import android.hardware.usb.UsbDevice;
 import android.media.Image;
 import android.media.ImageReader;
 import android.os.Build;
+import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
@@ -65,17 +66,21 @@ public class CamService extends Service {
     private View mPrimaryRootView;
     private TextureView mPrimaryTextureView;
     private WindowManager mPrimaryWindowManager;
-    private Surface mPrimarySurface;
+    private volatile Surface mPrimarySurface;
 
     // UI - Secondary
     private View mSecondaryRootView;
     private TextureView mSecondaryTextureView;
     private WindowManager mSecondaryWindowManager;
-    private Surface mSecondarySurface;
-    private boolean mHasSecondaryDisplay = false;
+    private volatile Surface mSecondarySurface;
+    private volatile boolean mHasSecondaryDisplay = false;
     private Context mSecondaryDisplayContext;
     private int mSecondaryWidthPx = 0;
     private int mSecondaryHeightPx = 0;
+    private int mSecondaryDisplayId = -1;
+
+    private DisplayManager mDisplayManager;
+    private Handler mMainHandler;
 
     WindowManager.LayoutParams invisibleParams;
     WindowManager.LayoutParams visibleParams;
@@ -137,25 +142,30 @@ public class CamService extends Service {
     private TextureView.SurfaceTextureListener mSecondarySurfaceListener = new TextureView.SurfaceTextureListener() {
         public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
             mSecondarySurface = new Surface(texture);
-            checkAndStartPreview();
+            // Hand the secondary surface to the camera handler. It starts mirroring
+            // immediately if the preview is already running, or remembers it and
+            // starts when the preview begins.
+            if (cameraHandler != null) {
+                cameraHandler.setSecondaryCapture(mSecondarySurface);
+            }
         }
         public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {}
         public boolean onSurfaceTextureDestroyed(SurfaceTexture texture) {
             mSecondarySurface = null;
+            if (cameraHandler != null) {
+                cameraHandler.setSecondaryCapture(null);
+            }
             return true;
         }
         public void onSurfaceTextureUpdated(SurfaceTexture texture) {}
     };
 
     private void checkAndStartPreview() {
+        // Idempotent: the camera handler ignores this until the camera is open and
+        // ignores duplicates while already previewing. Called both when the primary
+        // surface becomes available and when the USB camera connects.
         if (mPrimarySurface != null) {
-            if (mHasSecondaryDisplay) {
-                if (mSecondarySurface != null) {
-                    cameraHandler.startPreview(mPrimarySurface, mSecondarySurface);
-                }
-            } else {
-                cameraHandler.startPreview(mPrimarySurface);
-            }
+            cameraHandler.startPreview(mPrimarySurface);
         }
     }
 
@@ -225,7 +235,8 @@ public class CamService extends Service {
         startForeground();
 
         mPrimaryWindowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
-        mSecondaryWindowManager = getWindowManagerForSecondaryDisplay();
+        mMainHandler = new Handler(Looper.getMainLooper());
+        mDisplayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
 
         invisibleParams = new WindowManager.LayoutParams(
                 1,
@@ -251,24 +262,6 @@ public class CamService extends Service {
         // Force Landscape
         visibleParams.screenOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE;
 
-        // Secondary display gets its own params sized to its REAL pixel resolution,
-        // so it fills that screen regardless of how it differs from the primary.
-        if (mHasSecondaryDisplay && mSecondaryWidthPx > 0 && mSecondaryHeightPx > 0) {
-            secondaryVisibleParams = new WindowManager.LayoutParams(
-                    mSecondaryWidthPx,
-                    mSecondaryHeightPx,
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-                            | WindowManager.LayoutParams.FLAG_FULLSCREEN,
-                    PixelFormat.TRANSPARENT
-            );
-            secondaryVisibleParams.gravity = Gravity.TOP | Gravity.START;
-            secondaryVisibleParams.x = 0;
-            secondaryVisibleParams.y = 0;
-        }
-
 
         mUSBMonitor = new LibUVCCameraUSBMonitor(this, mOnDeviceConnectListener);
         checkPermissionCamera();
@@ -283,63 +276,139 @@ public class CamService extends Service {
         cameraHandler = new MyCameraHandler(serviceLooper);
 
         initOverlays();
+
+        // Watch for the HDMI/secondary screen appearing or disappearing at any time
+        // (it often attaches a moment after the service starts), then attach now if
+        // one is already present.
+        mDisplayManager.registerDisplayListener(mDisplayListener, mMainHandler);
+        attachSecondaryDisplayIfPresent();
     }
 
-    private WindowManager getWindowManagerForSecondaryDisplay() {
-        DisplayManager displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
-
-        // The PRESENTATION category returns ONLY secondary/external displays
-        // (the primary/default display is excluded), already sorted with the most
-        // preferred presentation display first. So a single external screen gives
-        // an array of length 1 here -- do NOT gate this on length > 1.
-        Display[] displays = displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
-
-        // Fallback: nothing reported as a presentation display, scan all displays.
-        // This list DOES include the default display, so it gets filtered below.
-        if (displays.length == 0) {
-            displays = displayManager.getDisplays();
-        }
-
-        // Pick the first display that isn't the primary one. Correct for both paths:
-        // the presentation list never contains the default display, and the full
-        // list has the default filtered out here.
-        for (Display display : displays) {
-            if (display.getDisplayId() != Display.DEFAULT_DISPLAY
-                    && display.getState() != Display.STATE_OFF) {
-                Log.i(TAG, "Secondary display detected: " + display.getName() + " (ID: " + display.getDisplayId() + ")");
-                mHasSecondaryDisplay = true;
-
-                // Capture the secondary display's REAL pixel size so we can size the
-                // overlay window in absolute pixels (MATCH_PARENT can resolve against
-                // the wrong display's metrics and only fill part of the screen).
-                DisplayMetrics dm = new DisplayMetrics();
-                display.getRealMetrics(dm);
-                mSecondaryWidthPx = dm.widthPixels;
-                mSecondaryHeightPx = dm.heightPixels;
-
-                Context displayContext = createDisplayContext(display);
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    // On API 30+ adding a TYPE_APPLICATION_OVERLAY window to a
-                    // secondary display requires a window context bound to that
-                    // display; a plain display context is not sufficient.
-                    Context windowContext = displayContext.createWindowContext(
-                            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null);
-                    mSecondaryDisplayContext = windowContext;
-                    return (WindowManager) windowContext.getSystemService(Context.WINDOW_SERVICE);
-                }
-                mSecondaryDisplayContext = displayContext;
-                return (WindowManager) displayContext.getSystemService(Context.WINDOW_SERVICE);
+    private final DisplayManager.DisplayListener mDisplayListener = new DisplayManager.DisplayListener() {
+        @Override
+        public void onDisplayAdded(int displayId) {
+            Log.i(TAG, "onDisplayAdded: " + displayId);
+            if (!mHasSecondaryDisplay) {
+                attachSecondaryDisplayIfPresent();
             }
         }
 
-        Log.i(TAG, "No secondary display detected.");
-        return null;
+        @Override
+        public void onDisplayRemoved(int displayId) {
+            Log.i(TAG, "onDisplayRemoved: " + displayId);
+            if (mHasSecondaryDisplay && displayId == mSecondaryDisplayId) {
+                detachSecondaryDisplay();
+            }
+        }
+
+        @Override
+        public void onDisplayChanged(int displayId) { }
+    };
+
+    /**
+     * Looks for a non-default (presentation) display and, if one is present and not
+     * already attached, sets up the secondary overlay on it. Runs both at startup
+     * and whenever a display is later added. Must run on the main thread (it touches
+     * WindowManager) -- the DisplayListener is registered with the main Handler.
+     */
+    private void attachSecondaryDisplayIfPresent() {
+        if (mHasSecondaryDisplay) return;
+
+        Display[] displays = mDisplayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
+        if (displays.length == 0) {
+            displays = mDisplayManager.getDisplays();
+        }
+        for (Display display : displays) {
+            if (display.getDisplayId() != Display.DEFAULT_DISPLAY
+                    && display.getState() != Display.STATE_OFF) {
+                attachSecondaryDisplay(display);
+                return;
+            }
+        }
+        Log.i(TAG, "No secondary display present yet.");
+    }
+
+    private void attachSecondaryDisplay(Display display) {
+        Log.i(TAG, "Attaching secondary display: " + display.getName() + " (ID: " + display.getDisplayId() + ")");
+        mSecondaryDisplayId = display.getDisplayId();
+
+        // Real pixel size, so the overlay window can be sized in absolute pixels and
+        // fill the whole screen (MATCH_PARENT can resolve against the wrong metrics).
+        DisplayMetrics dm = new DisplayMetrics();
+        display.getRealMetrics(dm);
+        mSecondaryWidthPx = dm.widthPixels;
+        mSecondaryHeightPx = dm.heightPixels;
+
+        Context displayContext = createDisplayContext(display);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // On API 30+ a window context bound to the target display is required to
+            // add a TYPE_APPLICATION_OVERLAY window there.
+            mSecondaryDisplayContext = displayContext.createWindowContext(
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null);
+        } else {
+            mSecondaryDisplayContext = displayContext;
+        }
+        mSecondaryWindowManager = (WindowManager) mSecondaryDisplayContext.getSystemService(Context.WINDOW_SERVICE);
+
+        secondaryVisibleParams = new WindowManager.LayoutParams(
+                mSecondaryWidthPx,
+                mSecondaryHeightPx,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                        | WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                PixelFormat.TRANSPARENT
+        );
+        secondaryVisibleParams.gravity = Gravity.TOP | Gravity.START;
+        secondaryVisibleParams.x = 0;
+        secondaryVisibleParams.y = 0;
+
+        // Inflate against the secondary display's context (correct density/metrics).
+        LayoutInflater li = LayoutInflater.from(mSecondaryDisplayContext);
+        mSecondaryRootView = li.inflate(R.layout.overlay, null);
+        mSecondaryTextureView = mSecondaryRootView.findViewById(R.id.texPreview);
+        setupTextureView(mSecondaryTextureView);
+        mSecondaryTextureView.setSurfaceTextureListener(mSecondarySurfaceListener);
+
+        // Start visible if a signal is currently showing, otherwise hidden off-screen.
+        WindowManager.LayoutParams startParams = visible ? secondaryVisibleParams : invisibleParams;
+        mSecondaryWindowManager.addView(mSecondaryRootView, startParams);
+
+        mHasSecondaryDisplay = true;
+        // If the camera is already streaming, the secondary surface becoming available
+        // (via mSecondarySurfaceListener) will attach the capture target.
+    }
+
+    private void detachSecondaryDisplay() {
+        Log.i(TAG, "Detaching secondary display: " + mSecondaryDisplayId);
+        mHasSecondaryDisplay = false;
+        if (cameraHandler != null) {
+            cameraHandler.setSecondaryCapture(null);
+        }
+        if (mSecondaryRootView != null && mSecondaryWindowManager != null) {
+            try {
+                mSecondaryWindowManager.removeView(mSecondaryRootView);
+            } catch (final Exception e) {
+                Log.w(TAG, "removeView (secondary) failed: " + e);
+            }
+        }
+        mSecondaryRootView = null;
+        mSecondaryTextureView = null;
+        mSecondaryWindowManager = null;
+        mSecondaryDisplayContext = null;
+        mSecondarySurface = null;
+        secondaryVisibleParams = null;
+        mSecondaryDisplayId = -1;
     }
 
 
 
     public void onDestroy() {
         Log.v(TAG, "--service onDestroy");
+        if (mDisplayManager != null) {
+            mDisplayManager.unregisterDisplayListener(mDisplayListener);
+        }
         cameraHandler.close();
         if (mUSBMonitor != null) {
             mUSBMonitor.destroy();
@@ -363,25 +432,13 @@ public class CamService extends Service {
         Log.v(TAG, "init overlays");
         LayoutInflater li = (LayoutInflater) this.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
 
-        // Primary
+        // Primary. The secondary overlay is created dynamically by
+        // attachSecondaryDisplay() whenever the external screen is present.
         mPrimaryRootView = li.inflate(R.layout.overlay, null);
         mPrimaryTextureView = mPrimaryRootView.findViewById(R.id.texPreview);
         setupTextureView(mPrimaryTextureView);
         mPrimaryTextureView.setSurfaceTextureListener(mPrimarySurfaceListener);
         mPrimaryWindowManager.addView(mPrimaryRootView, invisibleParams);
-
-        // Secondary
-        if (mHasSecondaryDisplay && mSecondaryWindowManager != null) {
-            // Inflate against the secondary display's context so the view tree is
-            // laid out with that display's resources/density, not the primary's.
-            LayoutInflater secondaryLi = (mSecondaryDisplayContext != null)
-                    ? LayoutInflater.from(mSecondaryDisplayContext) : li;
-            mSecondaryRootView = secondaryLi.inflate(R.layout.overlay, null);
-            mSecondaryTextureView = mSecondaryRootView.findViewById(R.id.texPreview);
-            setupTextureView(mSecondaryTextureView);
-            mSecondaryTextureView.setSurfaceTextureListener(mSecondarySurfaceListener);
-            mSecondaryWindowManager.addView(mSecondaryRootView, invisibleParams);
-        }
     }
 
     private void setupTextureView(TextureView tv) {

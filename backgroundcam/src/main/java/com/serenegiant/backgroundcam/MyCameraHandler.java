@@ -23,6 +23,10 @@ public class MyCameraHandler extends Handler {
     //    for accessing UVC camera
     private UVCCamera mUVCCamera;
 
+    // Optional secondary output (HDMI/external screen). Remembered here so it can be
+    // applied whenever the preview starts, and added/removed while already previewing.
+    private Surface mSecondarySurface;
+
     private boolean mIsPreviewing;
     public static final float DEFAULT_BANDWIDTH = 1.0f;
     private int mWidth = 1920;
@@ -46,6 +50,7 @@ public class MyCameraHandler extends Handler {
     private static final int MSG_CLOSE = 1;
     private static final int MSG_PREVIEW_START = 2;
     private static final int MSG_PREVIEW_STOP = 3;
+    private static final int MSG_SET_SECONDARY = 4;
 
     public MyCameraHandler(Looper looper) {
         super(looper);
@@ -70,6 +75,10 @@ public class MyCameraHandler extends Handler {
             case MSG_PREVIEW_STOP:
                 Log.v(TAG, "--handler received message preview stop");
                 handleStopPreview();
+                break;
+            case MSG_SET_SECONDARY:
+                Log.v(TAG, "--handler received message set secondary");
+                handleSetSecondary((Surface) msg.obj);
                 break;
             default:
                 throw new RuntimeException("unsupported message: what = " + msg.what);
@@ -126,20 +135,16 @@ public class MyCameraHandler extends Handler {
             }
         }
 
-        if (surface instanceof Object[]) {
-            Object[] surfaces = (Object[]) surface;
-            if (surfaces.length > 0 && surfaces[0] != null) {
-                setPreviewDisplay(surfaces[0]);
-                mUVCCamera.startPreview();
-                if (surfaces.length > 1 && surfaces[1] != null) {
-                    if (surfaces[1] instanceof Surface) {
-                        mUVCCamera.startCapture((Surface) surfaces[1]);
-                    }
-                }
+        setPreviewDisplay(surface);
+        mUVCCamera.startPreview();
+
+        // If a secondary screen is already known, mirror to it as well.
+        if (mSecondarySurface != null) {
+            try {
+                mUVCCamera.startCapture(mSecondarySurface);
+            } catch (final Exception e) {
+                callOnError(e);
             }
-        } else {
-            setPreviewDisplay(surface);
-            mUVCCamera.startPreview();
         }
 
         mUVCCamera.updateCameraParams();
@@ -175,6 +180,26 @@ public class MyCameraHandler extends Handler {
             callOnStopPreview();
         }
         Log.v(TAG, "handler handleStopPreview:finished");
+    }
+
+    // Set (or clear, with null) the secondary output. Starts/stops mirroring
+    // immediately if the preview is already running; otherwise it is remembered and
+    // applied by handleStartPreview when the preview begins.
+    private void handleSetSecondary(final Surface surface) {
+        Log.v(TAG, "handler handleSetSecondary: " + (surface != null));
+        mSecondarySurface = surface;
+        if (mUVCCamera == null) return;
+        try {
+            if (surface != null) {
+                if (mIsPreviewing) {
+                    mUVCCamera.startCapture(surface);
+                }
+            } else {
+                mUVCCamera.stopCapture();
+            }
+        } catch (final Exception e) {
+            Log.w(TAG, e);
+        }
     }
 
 
@@ -254,17 +279,15 @@ public class MyCameraHandler extends Handler {
 
     protected void startPreview(final Object surface) {
         Log.v(TAG, "delivering message start preview");
-        if (surface instanceof Object[]) {
-            // Already an array
-        } else if (!((surface instanceof SurfaceHolder) || (surface instanceof Surface) || (surface instanceof SurfaceTexture))) {
+        if (!((surface instanceof SurfaceHolder) || (surface instanceof Surface) || (surface instanceof SurfaceTexture))) {
             throw new IllegalArgumentException("surface should be one of SurfaceHolder, Surface or SurfaceTexture");
         }
         sendMessage(obtainMessage(MSG_PREVIEW_START, surface));
     }
 
-    protected void startPreview(final Surface primary, final Surface secondary) {
-        Log.v(TAG, "delivering message start preview (dual)");
-        sendMessage(obtainMessage(MSG_PREVIEW_START, new Object[]{primary, secondary}));
+    protected void setSecondaryCapture(final Surface surface) {
+        Log.v(TAG, "delivering message set secondary capture: " + (surface != null));
+        sendMessage(obtainMessage(MSG_SET_SECONDARY, surface));
     }
 
 
