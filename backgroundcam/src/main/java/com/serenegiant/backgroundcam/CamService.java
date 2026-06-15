@@ -28,9 +28,11 @@ import android.os.Build;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.Size;
 import android.view.Display;
+import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.Surface;
 import android.view.TextureView;
@@ -71,9 +73,13 @@ public class CamService extends Service {
     private WindowManager mSecondaryWindowManager;
     private Surface mSecondarySurface;
     private boolean mHasSecondaryDisplay = false;
+    private Context mSecondaryDisplayContext;
+    private int mSecondaryWidthPx = 0;
+    private int mSecondaryHeightPx = 0;
 
     WindowManager.LayoutParams invisibleParams;
     WindowManager.LayoutParams visibleParams;
+    WindowManager.LayoutParams secondaryVisibleParams;
 
 
     // UVC Camera
@@ -200,12 +206,15 @@ public class CamService extends Service {
     private void updateVisibility(boolean shouldShow) {
         visible = shouldShow;
         WindowManager.LayoutParams params = shouldShow ? visibleParams : invisibleParams;
-        
+
         if (mPrimaryRootView != null) {
             mPrimaryWindowManager.updateViewLayout(mPrimaryRootView, params);
         }
         if (mSecondaryRootView != null && mHasSecondaryDisplay && mSecondaryWindowManager != null) {
-            mSecondaryWindowManager.updateViewLayout(mSecondaryRootView, params);
+            WindowManager.LayoutParams secParams = shouldShow
+                    ? (secondaryVisibleParams != null ? secondaryVisibleParams : params)
+                    : invisibleParams;
+            mSecondaryWindowManager.updateViewLayout(mSecondaryRootView, secParams);
         }
     }
 
@@ -241,6 +250,24 @@ public class CamService extends Service {
 
         // Force Landscape
         visibleParams.screenOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE;
+
+        // Secondary display gets its own params sized to its REAL pixel resolution,
+        // so it fills that screen regardless of how it differs from the primary.
+        if (mHasSecondaryDisplay && mSecondaryWidthPx > 0 && mSecondaryHeightPx > 0) {
+            secondaryVisibleParams = new WindowManager.LayoutParams(
+                    mSecondaryWidthPx,
+                    mSecondaryHeightPx,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                            | WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                    PixelFormat.TRANSPARENT
+            );
+            secondaryVisibleParams.gravity = Gravity.TOP | Gravity.START;
+            secondaryVisibleParams.x = 0;
+            secondaryVisibleParams.y = 0;
+        }
 
 
         mUSBMonitor = new LibUVCCameraUSBMonitor(this, mOnDeviceConnectListener);
@@ -282,6 +309,14 @@ public class CamService extends Service {
                 Log.i(TAG, "Secondary display detected: " + display.getName() + " (ID: " + display.getDisplayId() + ")");
                 mHasSecondaryDisplay = true;
 
+                // Capture the secondary display's REAL pixel size so we can size the
+                // overlay window in absolute pixels (MATCH_PARENT can resolve against
+                // the wrong display's metrics and only fill part of the screen).
+                DisplayMetrics dm = new DisplayMetrics();
+                display.getRealMetrics(dm);
+                mSecondaryWidthPx = dm.widthPixels;
+                mSecondaryHeightPx = dm.heightPixels;
+
                 Context displayContext = createDisplayContext(display);
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     // On API 30+ adding a TYPE_APPLICATION_OVERLAY window to a
@@ -289,8 +324,10 @@ public class CamService extends Service {
                     // display; a plain display context is not sufficient.
                     Context windowContext = displayContext.createWindowContext(
                             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null);
+                    mSecondaryDisplayContext = windowContext;
                     return (WindowManager) windowContext.getSystemService(Context.WINDOW_SERVICE);
                 }
+                mSecondaryDisplayContext = displayContext;
                 return (WindowManager) displayContext.getSystemService(Context.WINDOW_SERVICE);
             }
         }
@@ -309,7 +346,7 @@ public class CamService extends Service {
             mUSBMonitor = null;
         }
         serviceLooper.quit();
-        
+
         if (mPrimaryRootView != null) {
             mPrimaryWindowManager.removeView(mPrimaryRootView);
         }
@@ -335,7 +372,11 @@ public class CamService extends Service {
 
         // Secondary
         if (mHasSecondaryDisplay && mSecondaryWindowManager != null) {
-            mSecondaryRootView = li.inflate(R.layout.overlay, null);
+            // Inflate against the secondary display's context so the view tree is
+            // laid out with that display's resources/density, not the primary's.
+            LayoutInflater secondaryLi = (mSecondaryDisplayContext != null)
+                    ? LayoutInflater.from(mSecondaryDisplayContext) : li;
+            mSecondaryRootView = secondaryLi.inflate(R.layout.overlay, null);
             mSecondaryTextureView = mSecondaryRootView.findViewById(R.id.texPreview);
             setupTextureView(mSecondaryTextureView);
             mSecondaryTextureView.setSurfaceTextureListener(mSecondarySurfaceListener);

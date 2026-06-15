@@ -20,13 +20,13 @@ public class MyCameraHandler extends Handler {
 
     private final Object mSync = new Object();
 
-//    for accessing UVC camera
+    //    for accessing UVC camera
     private UVCCamera mUVCCamera;
 
     private boolean mIsPreviewing;
     public static final float DEFAULT_BANDWIDTH = 1.0f;
-    private int mWidth = 640;
-    private int mHeight = 480;
+    private int mWidth = 1920;
+    private int mHeight = 1080;
     private float mBandwidthFactor = DEFAULT_BANDWIDTH;
     private int mPreviewMode = 1;
 
