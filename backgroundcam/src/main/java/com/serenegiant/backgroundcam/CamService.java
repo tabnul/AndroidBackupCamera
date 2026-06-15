@@ -260,20 +260,38 @@ public class CamService extends Service {
 
     private WindowManager getWindowManagerForSecondaryDisplay() {
         DisplayManager displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+
+        // The PRESENTATION category returns ONLY secondary/external displays
+        // (the primary/default display is excluded), already sorted with the most
+        // preferred presentation display first. So a single external screen gives
+        // an array of length 1 here -- do NOT gate this on length > 1.
         Display[] displays = displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
 
+        // Fallback: nothing reported as a presentation display, scan all displays.
+        // This list DOES include the default display, so it gets filtered below.
         if (displays.length == 0) {
             displays = displayManager.getDisplays();
         }
 
-        if (displays.length > 1) {
-            for (Display display : displays) {
-                if (display.getDisplayId() != Display.DEFAULT_DISPLAY) {
-                    Log.i(TAG, "Secondary display detected: " + display.getName() + " (ID: " + display.getDisplayId() + ")");
-                    Context displayContext = createDisplayContext(display);
-                    mHasSecondaryDisplay = true;
-                    return (WindowManager) displayContext.getSystemService(Context.WINDOW_SERVICE);
+        // Pick the first display that isn't the primary one. Correct for both paths:
+        // the presentation list never contains the default display, and the full
+        // list has the default filtered out here.
+        for (Display display : displays) {
+            if (display.getDisplayId() != Display.DEFAULT_DISPLAY
+                    && display.getState() != Display.STATE_OFF) {
+                Log.i(TAG, "Secondary display detected: " + display.getName() + " (ID: " + display.getDisplayId() + ")");
+                mHasSecondaryDisplay = true;
+
+                Context displayContext = createDisplayContext(display);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    // On API 30+ adding a TYPE_APPLICATION_OVERLAY window to a
+                    // secondary display requires a window context bound to that
+                    // display; a plain display context is not sufficient.
+                    Context windowContext = displayContext.createWindowContext(
+                            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null);
+                    return (WindowManager) windowContext.getSystemService(Context.WINDOW_SERVICE);
                 }
+                return (WindowManager) displayContext.getSystemService(Context.WINDOW_SERVICE);
             }
         }
 
