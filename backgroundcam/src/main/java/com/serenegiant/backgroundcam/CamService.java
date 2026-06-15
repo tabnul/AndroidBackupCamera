@@ -19,6 +19,7 @@ import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
+import android.hardware.display.DisplayManager;
 import android.hardware.usb.UsbConfiguration;
 import android.hardware.usb.UsbDevice;
 import android.media.Image;
@@ -29,6 +30,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.util.Log;
 import android.util.Size;
+import android.view.Display;
 import android.view.LayoutInflater;
 import android.view.Surface;
 import android.view.TextureView;
@@ -57,9 +59,18 @@ public class CamService extends Service {
 
 
 
-    // UI
-    private View rootView;
-    private TextureView textureView;
+    // UI - Primary
+    private View mPrimaryRootView;
+    private TextureView mPrimaryTextureView;
+    private WindowManager mPrimaryWindowManager;
+    private Surface mPrimarySurface;
+
+    // UI - Secondary
+    private View mSecondaryRootView;
+    private TextureView mSecondaryTextureView;
+    private WindowManager mSecondaryWindowManager;
+    private Surface mSecondarySurface;
+    private boolean mHasSecondaryDisplay = false;
 
     WindowManager.LayoutParams invisibleParams;
     WindowManager.LayoutParams visibleParams;
@@ -102,80 +113,101 @@ public class CamService extends Service {
 
 
 
-    private TextureView.SurfaceTextureListener surfaceTextureListener = new TextureView.SurfaceTextureListener() {
-
+    private TextureView.SurfaceTextureListener mPrimarySurfaceListener = new TextureView.SurfaceTextureListener() {
         public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
-            // ... (Your existing Aspect Ratio code) ...
-
-            // FORCE initial visibility check
-            WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
-            wm.updateViewLayout(rootView, visibleParams);
-            visible = true;
-
-            // Start the camera handler after layout is set
-            if (textureView.getSurfaceTexture() != null) {
-                cameraHandler.startPreview(new Surface(textureView.getSurfaceTexture()));
-            }
+            mPrimarySurface = new Surface(texture);
+            checkAndStartPreview();
         }
-
-        public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {
-        }
-
+        public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {}
         public boolean onSurfaceTextureDestroyed(SurfaceTexture texture) {
+            mPrimarySurface = null;
             return true;
         }
-
         public void onSurfaceTextureUpdated(SurfaceTexture texture) {
-            // OPTIMIZATION: Get a tiny version of the bitmap (16x12 pixels).
-            Bitmap bitmap = textureView.getBitmap(16, 12);
-            if (bitmap == null) return;
-
-            long sumRed = 0;
-            long sumGreen = 0;
-            long sumBlue = 0;
-
-            int width = bitmap.getWidth();
-            int height = bitmap.getHeight();
-            int n = width * height;
-            int[] pixels = new int[n];
-
-            bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
-
-            for (int color : pixels) {
-                sumRed += Color.red(color);
-                sumGreen += Color.green(color);
-                sumBlue += Color.blue(color);
-            }
-
-            // Clean up bitmap memory immediately
-            bitmap.recycle();
-
-            // Calculate the overall average brightness
-            // We divide by (3 * n) because there are 3 color channels per pixel
-            int averageBrightness = (int) ((sumRed + sumGreen + sumBlue) / (3 * n));
-
-            // BLACK DETECTION LOGIC:
-            // 0 is pure black, 255 is pure white.
-            // 16-20 is a good threshold for "black" to account for sensor noise.
-            int threshold = 16;
-            boolean isBlackDetected = (averageBrightness <= threshold);
-
-            WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
-
-            // If it's black (Signal Lost/Lens Covered), we HIDE the overlay
-            if (isBlackDetected && visible) {
-                Log.v(TAG, "------ Black Screen Detected (No Signal) -> Hiding ------");
-                wm.updateViewLayout(rootView, invisibleParams);
-                visible = false;
-            }
-            // If it's NOT black (Valid Video), we SHOW the overlay
-            else if (!isBlackDetected && !visible) {
-                Log.v(TAG, "------ Light Detected (Signal Found) -> Showing ------");
-                wm.updateViewLayout(rootView, visibleParams);
-                visible = true;
-            }
+            detectSignal(mPrimaryTextureView);
         }
     };
+
+    private TextureView.SurfaceTextureListener mSecondarySurfaceListener = new TextureView.SurfaceTextureListener() {
+        public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
+            mSecondarySurface = new Surface(texture);
+            checkAndStartPreview();
+        }
+        public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {}
+        public boolean onSurfaceTextureDestroyed(SurfaceTexture texture) {
+            mSecondarySurface = null;
+            return true;
+        }
+        public void onSurfaceTextureUpdated(SurfaceTexture texture) {}
+    };
+
+    private void checkAndStartPreview() {
+        if (mPrimarySurface != null) {
+            if (mHasSecondaryDisplay) {
+                if (mSecondarySurface != null) {
+                    cameraHandler.startPreview(mPrimarySurface, mSecondarySurface);
+                }
+            } else {
+                cameraHandler.startPreview(mPrimarySurface);
+            }
+        }
+    }
+
+    private void detectSignal(TextureView textureView) {
+        // OPTIMIZATION: Get a tiny version of the bitmap (16x12 pixels).
+        Bitmap bitmap = textureView.getBitmap(16, 12);
+        if (bitmap == null) return;
+
+        long sumRed = 0;
+        long sumGreen = 0;
+        long sumBlue = 0;
+
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        int n = width * height;
+        int[] pixels = new int[n];
+
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
+
+        for (int color : pixels) {
+            sumRed += Color.red(color);
+            sumGreen += Color.green(color);
+            sumBlue += Color.blue(color);
+        }
+
+        // Clean up bitmap memory immediately
+        bitmap.recycle();
+
+        // Calculate the overall average brightness
+        int averageBrightness = (int) ((sumRed + sumGreen + sumBlue) / (3 * n));
+
+        // BLACK DETECTION LOGIC:
+        int threshold = 16;
+        boolean isBlackDetected = (averageBrightness <= threshold);
+
+        // If it's black (Signal Lost/Lens Covered), we HIDE the overlays
+        if (isBlackDetected && visible) {
+            Log.v(TAG, "------ Black Screen Detected (No Signal) -> Hiding ------");
+            updateVisibility(false);
+        }
+        // If it's NOT black (Valid Video), we SHOW the overlays
+        else if (!isBlackDetected && !visible) {
+            Log.v(TAG, "------ Light Detected (Signal Found) -> Showing ------");
+            updateVisibility(true);
+        }
+    }
+
+    private void updateVisibility(boolean shouldShow) {
+        visible = shouldShow;
+        WindowManager.LayoutParams params = shouldShow ? visibleParams : invisibleParams;
+        
+        if (mPrimaryRootView != null) {
+            mPrimaryWindowManager.updateViewLayout(mPrimaryRootView, params);
+        }
+        if (mSecondaryRootView != null && mHasSecondaryDisplay && mSecondaryWindowManager != null) {
+            mSecondaryWindowManager.updateViewLayout(mSecondaryRootView, params);
+        }
+    }
 
 
     public void onCreate() {
@@ -183,21 +215,23 @@ public class CamService extends Service {
         super.onCreate();
         startForeground();
 
+        mPrimaryWindowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+        mSecondaryWindowManager = getWindowManagerForSecondaryDisplay();
+
         invisibleParams = new WindowManager.LayoutParams(
                 1,
                 1,
-                -1080,
-                -1215,
+                -10000, // Position off-screen
+                0,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.OPAQUE
         );
 
-        // ... (existing invisibleParams) ...
-
         visibleParams = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
@@ -221,7 +255,30 @@ public class CamService extends Service {
         serviceLooper = thread.getLooper();
         cameraHandler = new MyCameraHandler(serviceLooper);
 
-        initOverlay();
+        initOverlays();
+    }
+
+    private WindowManager getWindowManagerForSecondaryDisplay() {
+        DisplayManager displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+        Display[] displays = displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION);
+
+        if (displays.length == 0) {
+            displays = displayManager.getDisplays();
+        }
+
+        if (displays.length > 1) {
+            for (Display display : displays) {
+                if (display.getDisplayId() != Display.DEFAULT_DISPLAY) {
+                    Log.i(TAG, "Secondary display detected: " + display.getName() + " (ID: " + display.getDisplayId() + ")");
+                    Context displayContext = createDisplayContext(display);
+                    mHasSecondaryDisplay = true;
+                    return (WindowManager) displayContext.getSystemService(Context.WINDOW_SERVICE);
+                }
+            }
+        }
+
+        Log.i(TAG, "No secondary display detected.");
+        return null;
     }
 
 
@@ -234,9 +291,12 @@ public class CamService extends Service {
             mUSBMonitor = null;
         }
         serviceLooper.quit();
-        WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
-        if (rootView != null) {
-            wm.removeView(rootView);
+        
+        if (mPrimaryRootView != null) {
+            mPrimaryWindowManager.removeView(mPrimaryRootView);
+        }
+        if (mSecondaryRootView != null && mSecondaryWindowManager != null) {
+            mSecondaryWindowManager.removeView(mSecondaryRootView);
         }
         super.onDestroy();
     }
@@ -244,25 +304,33 @@ public class CamService extends Service {
 
 
 
-    private void initOverlay() {
-        Log.v(TAG, "init overlay");
+    private void initOverlays() {
+        Log.v(TAG, "init overlays");
+        LayoutInflater li = (LayoutInflater) this.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
 
-        LayoutInflater li = (LayoutInflater) this.getSystemService(Context.LAYOUT_INFLATER_SERVICE);    rootView = li.inflate(R.layout.overlay, null);
-        textureView = rootView.findViewById(R.id.texPreview);
+        // Primary
+        mPrimaryRootView = li.inflate(R.layout.overlay, null);
+        mPrimaryTextureView = mPrimaryRootView.findViewById(R.id.texPreview);
+        setupTextureView(mPrimaryTextureView);
+        mPrimaryTextureView.setSurfaceTextureListener(mPrimarySurfaceListener);
+        mPrimaryWindowManager.addView(mPrimaryRootView, invisibleParams);
 
-        // This ensures the TextureView maintains its aspect ratio within the fullscreen layout
-        // Center it in the parent container
+        // Secondary
+        if (mHasSecondaryDisplay && mSecondaryWindowManager != null) {
+            mSecondaryRootView = li.inflate(R.layout.overlay, null);
+            mSecondaryTextureView = mSecondaryRootView.findViewById(R.id.texPreview);
+            setupTextureView(mSecondaryTextureView);
+            mSecondaryTextureView.setSurfaceTextureListener(mSecondarySurfaceListener);
+            mSecondaryWindowManager.addView(mSecondaryRootView, invisibleParams);
+        }
+    }
+
+    private void setupTextureView(TextureView tv) {
         RelativeLayout.LayoutParams lp = new RelativeLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT);
         lp.addRule(RelativeLayout.CENTER_IN_PARENT);
-        textureView.setLayoutParams(lp);
-
-        textureView.setSurfaceTextureListener(surfaceTextureListener);
-
-        WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
-        // Add with invisibleParams initially
-        wm.addView(rootView, invisibleParams);
+        tv.setLayoutParams(lp);
     }
 
 
@@ -284,7 +352,6 @@ public class CamService extends Service {
                 Toast.makeText(CamService.this.getApplicationContext(),"Attached " + device.getProductName(),Toast.LENGTH_SHORT).show();
                 mUSBMonitor.requestPermission(device);
             }
-//			Toast.makeText(MainActivity.this, "USB Device Attached", Toast.LENGTH_SHORT).show();
         }
 
         @Override
@@ -297,12 +364,7 @@ public class CamService extends Service {
 
 
         private void startPreview() {
-//            final SurfaceTexture st = MainActivity.mUVCCameraView.getSurfaceTexture();
-            final SurfaceTexture st = textureView.getSurfaceTexture();
-            Log.v(TAG, "service is starting preview; SurfaceTexture null =  " + (st == null));
-            if (st != null) {
-                cameraHandler.startPreview(new Surface(st));
-            }
+            checkAndStartPreview();
         }
 
         @Override
@@ -310,7 +372,6 @@ public class CamService extends Service {
             Log.v(TAG, "--onDisconnect " + device.getProductName());
             if ((device.getDeviceClass() == 239) & (device.getDeviceSubclass() == 2)) {
                 stopSelf();
-//                cameraHandler.close();
             }
         }
         @Override
@@ -320,7 +381,6 @@ public class CamService extends Service {
 
         @Override
         public void onCancel(final UsbDevice device) {
-//			setCameraButton(false);
         }
     };
 

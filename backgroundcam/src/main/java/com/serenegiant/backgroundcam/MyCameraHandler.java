@@ -125,19 +125,38 @@ public class MyCameraHandler extends Handler {
                 return;
             }
         }
-        if (surface instanceof SurfaceHolder) {
-            mUVCCamera.setPreviewDisplay((SurfaceHolder)surface);
-        } if (surface instanceof Surface) {
-            mUVCCamera.setPreviewDisplay((Surface)surface);
+
+        if (surface instanceof Object[]) {
+            Object[] surfaces = (Object[]) surface;
+            if (surfaces.length > 0 && surfaces[0] != null) {
+                setPreviewDisplay(surfaces[0]);
+                mUVCCamera.startPreview();
+                if (surfaces.length > 1 && surfaces[1] != null) {
+                    if (surfaces[1] instanceof Surface) {
+                        mUVCCamera.startCapture((Surface) surfaces[1]);
+                    }
+                }
+            }
         } else {
-            mUVCCamera.setPreviewTexture((SurfaceTexture)surface);
+            setPreviewDisplay(surface);
+            mUVCCamera.startPreview();
         }
-        mUVCCamera.startPreview();
+
         mUVCCamera.updateCameraParams();
         synchronized (mSync) {
             mIsPreviewing = true;
         }
         callOnStartPreview();
+    }
+
+    private void setPreviewDisplay(Object surface) {
+        if (surface instanceof SurfaceHolder) {
+            mUVCCamera.setPreviewDisplay((SurfaceHolder)surface);
+        } else if (surface instanceof Surface) {
+            mUVCCamera.setPreviewDisplay((Surface)surface);
+        } else if (surface instanceof SurfaceTexture) {
+            mUVCCamera.setPreviewTexture((SurfaceTexture)surface);
+        }
     }
 
 
@@ -146,6 +165,7 @@ public class MyCameraHandler extends Handler {
         Log.v(TAG, "handler handleStopPreview:");
         if (mIsPreviewing) {
             if (mUVCCamera != null) {
+                mUVCCamera.stopCapture();
                 mUVCCamera.stopPreview();
             }
             synchronized (mSync) {
@@ -234,10 +254,17 @@ public class MyCameraHandler extends Handler {
 
     protected void startPreview(final Object surface) {
         Log.v(TAG, "delivering message start preview");
-        if (!((surface instanceof SurfaceHolder) || (surface instanceof Surface) || (surface instanceof SurfaceTexture))) {
+        if (surface instanceof Object[]) {
+            // Already an array
+        } else if (!((surface instanceof SurfaceHolder) || (surface instanceof Surface) || (surface instanceof SurfaceTexture))) {
             throw new IllegalArgumentException("surface should be one of SurfaceHolder, Surface or SurfaceTexture");
         }
         sendMessage(obtainMessage(MSG_PREVIEW_START, surface));
+    }
+
+    protected void startPreview(final Surface primary, final Surface secondary) {
+        Log.v(TAG, "delivering message start preview (dual)");
+        sendMessage(obtainMessage(MSG_PREVIEW_START, new Object[]{primary, secondary}));
     }
 
 
