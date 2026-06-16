@@ -190,10 +190,10 @@ public class CamService extends Service {
      * from the TextureView, so repeatedly fitting is stable and never shrinks itself.
      */
     private void applySecondaryFit() {
-        if (mSecondaryTextureView == null || cameraHandler == null) return;
-        final int availW = mSecondaryWidthPx;
-        final int availH = mSecondaryHeightPx;
-        if (availW <= 0 || availH <= 0) return;
+        if (mSecondaryRootView == null || mSecondaryTextureView == null || cameraHandler == null) return;
+        final int availW = mSecondaryRootView.getWidth();
+        final int availH = mSecondaryRootView.getHeight();
+        if (availW < 64 || availH < 64) return; // hidden/placeholder; wait for full layout
         final int frameW = cameraHandler.getFrameWidth();
         final int frameH = cameraHandler.getFrameHeight();
         if (frameW <= 0 || frameH <= 0) return;
@@ -442,9 +442,17 @@ public class CamService extends Service {
             mSecondaryRootView = root;
             mSecondaryTextureView = tv;
 
-            // Size the TextureView to the fitted rectangle up front (from display metrics),
-            // so its surface is created at the right size even while the window is hidden.
-            applySecondaryFit();
+            // Re-fit whenever the container's size changes -- in particular when it grows
+            // from the hidden 1x1 placeholder to full-screen as a signal appears.
+            root.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                @Override
+                public void onLayoutChange(View v, int l, int t, int r, int b,
+                                           int oldL, int oldT, int oldR, int oldB) {
+                    if ((r - l) != (oldR - oldL) || (b - t) != (oldB - oldT)) {
+                        applySecondaryFit();
+                    }
+                }
+            });
 
             // Start visible if a signal is currently showing, otherwise hidden off-screen.
             WindowManager.LayoutParams startParams = visible ? secondaryVisibleParams : invisibleParams;
