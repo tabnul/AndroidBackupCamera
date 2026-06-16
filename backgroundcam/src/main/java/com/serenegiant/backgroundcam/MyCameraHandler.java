@@ -26,6 +26,7 @@ public class MyCameraHandler extends Handler {
     // Optional secondary output (HDMI/external screen). Remembered here so it can be
     // applied whenever the preview starts, and added/removed while already previewing.
     private Surface mSecondarySurface;
+    private boolean mCaptureActive = false;
 
     private boolean mIsPreviewing;
     public static final float DEFAULT_BANDWIDTH = 1.0f;
@@ -33,6 +34,9 @@ public class MyCameraHandler extends Handler {
     private int mHeight = 1080;
     private float mBandwidthFactor = DEFAULT_BANDWIDTH;
     private int mPreviewMode = 1;
+
+    public int getFrameWidth() { return mWidth; }
+    public int getFrameHeight() { return mHeight; }
 
     private final Set<CameraCallback> mCallbacks = new CopyOnWriteArraySet<CameraCallback>();
 
@@ -114,6 +118,7 @@ public class MyCameraHandler extends Handler {
         if (camera != null) {
             camera.stopPreview();
             camera.destroy();
+            mCaptureActive = false;
             callOnClose();
         }
     }
@@ -139,9 +144,10 @@ public class MyCameraHandler extends Handler {
         mUVCCamera.startPreview();
 
         // If a secondary screen is already known, mirror to it as well.
-        if (mSecondarySurface != null) {
+        if (mSecondarySurface != null && !mCaptureActive) {
             try {
                 mUVCCamera.startCapture(mSecondarySurface);
+                mCaptureActive = true;
             } catch (final Exception e) {
                 callOnError(e);
             }
@@ -173,6 +179,7 @@ public class MyCameraHandler extends Handler {
                 mUVCCamera.stopCapture();
                 mUVCCamera.stopPreview();
             }
+            mCaptureActive = false;
             synchronized (mSync) {
                 mIsPreviewing = false;
                 mSync.notifyAll();
@@ -191,11 +198,15 @@ public class MyCameraHandler extends Handler {
         if (mUVCCamera == null) return;
         try {
             if (surface != null) {
-                if (mIsPreviewing) {
+                if (mIsPreviewing && !mCaptureActive) {
                     mUVCCamera.startCapture(surface);
+                    mCaptureActive = true;
                 }
             } else {
-                mUVCCamera.stopCapture();
+                if (mCaptureActive) {
+                    mUVCCamera.stopCapture();
+                    mCaptureActive = false;
+                }
             }
         } catch (final Exception e) {
             Log.w(TAG, e);

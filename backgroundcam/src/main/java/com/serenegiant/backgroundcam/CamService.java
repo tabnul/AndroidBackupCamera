@@ -41,6 +41,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.RelativeLayout;
+import android.widget.FrameLayout;
 import android.widget.Toast;
 
 import androidx.constraintlayout.widget.ConstraintLayout;
@@ -141,7 +142,13 @@ public class CamService extends Service {
 
     private TextureView.SurfaceTextureListener mSecondarySurfaceListener = new TextureView.SurfaceTextureListener() {
         public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
+            // The UVC capture path copies each frame into the surface buffer 1:1,
+            // top-left aligned, with NO scaling, and never sets buffer geometry. So
+            // pin the buffer to the full camera frame size: the whole frame is copied
+            // in, and the TextureView then scales it down to the fitted view bounds.
+            forceSecondaryBufferToFrameSize(texture);
             mSecondarySurface = new Surface(texture);
+            applySecondaryFit();
             // Hand the secondary surface to the camera handler. It starts mirroring
             // immediately if the preview is already running, or remembers it and
             // starts when the preview begins.
@@ -149,7 +156,10 @@ public class CamService extends Service {
                 cameraHandler.setSecondaryCapture(mSecondarySurface);
             }
         }
-        public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {}
+        public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {
+            forceSecondaryBufferToFrameSize(texture);
+            applySecondaryFit();
+        }
         public boolean onSurfaceTextureDestroyed(SurfaceTexture texture) {
             mSecondarySurface = null;
             if (cameraHandler != null) {
@@ -159,6 +169,53 @@ public class CamService extends Service {
         }
         public void onSurfaceTextureUpdated(SurfaceTexture texture) {}
     };
+
+    private void forceSecondaryBufferToFrameSize(SurfaceTexture texture) {
+        if (texture == null || cameraHandler == null) return;
+        final int fw = cameraHandler.getFrameWidth();
+        final int fh = cameraHandler.getFrameHeight();
+        if (fw > 0 && fh > 0) {
+            texture.setDefaultBufferSize(fw, fh);
+        }
+    }
+
+    /**
+     * Sizes the secondary TextureView to the largest rectangle with the camera's
+     * aspect ratio that fits inside the (full-screen, black) container, and centers
+     * it. A TextureView always scales its content to its own bounds, so making the
+     * view exactly the fitted size gives a tight, undistorted image with black bars
+     * only where the screen and camera aspect ratios differ.
+     *
+     * The available area is read from the container (which stays full-screen), not
+     * from the TextureView, so repeatedly fitting is stable and never shrinks itself.
+     */
+    private void applySecondaryFit() {
+        if (mSecondaryTextureView == null || cameraHandler == null) return;
+        final int availW = mSecondaryWidthPx;
+        final int availH = mSecondaryHeightPx;
+        if (availW <= 0 || availH <= 0) return;
+        final int frameW = cameraHandler.getFrameWidth();
+        final int frameH = cameraHandler.getFrameHeight();
+        if (frameW <= 0 || frameH <= 0) return;
+
+        final float scale = Math.min((float) availW / frameW, (float) availH / frameH);
+        final int fitW = Math.max(1, Math.round(frameW * scale));
+        final int fitH = Math.max(1, Math.round(frameH * scale));
+
+        try {
+            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) mSecondaryTextureView.getLayoutParams();
+            if (lp.width != fitW || lp.height != fitH) {
+                lp.width = fitW;
+                lp.height = fitH;
+                lp.gravity = Gravity.CENTER;
+                mSecondaryTextureView.setLayoutParams(lp);
+                Log.i(TAG, "secondary fit: avail=" + availW + "x" + availH + " frame=" + frameW + "x" + frameH
+                        + " -> tex=" + fitW + "x" + fitH);
+            }
+        } catch (final Throwable t) {
+            Log.w(TAG, "applySecondaryFit failed: " + t);
+        }
+    }
 
     private void checkAndStartPreview() {
         // Idempotent: the camera handler ignores this until the camera is open and
@@ -329,55 +386,88 @@ public class CamService extends Service {
     }
 
     private void attachSecondaryDisplay(Display display) {
-        Log.i(TAG, "Attaching secondary display: " + display.getName() + " (ID: " + display.getDisplayId() + ")");
-        mSecondaryDisplayId = display.getDisplayId();
+        try {
+            Log.i(TAG, "Attaching secondary display: " + display.getName() + " (ID: " + display.getDisplayId() + ")");
+            mSecondaryDisplayId = display.getDisplayId();
 
-        // Real pixel size, so the overlay window can be sized in absolute pixels and
-        // fill the whole screen (MATCH_PARENT can resolve against the wrong metrics).
-        DisplayMetrics dm = new DisplayMetrics();
-        display.getRealMetrics(dm);
-        mSecondaryWidthPx = dm.widthPixels;
-        mSecondaryHeightPx = dm.heightPixels;
+            // Real pixel size (kept for logging/reference).
+            DisplayMetrics dm = new DisplayMetrics();
+            display.getRealMetrics(dm);
+            mSecondaryWidthPx = dm.widthPixels;
+            mSecondaryHeightPx = dm.heightPixels;
 
-        Context displayContext = createDisplayContext(display);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // On API 30+ a window context bound to the target display is required to
-            // add a TYPE_APPLICATION_OVERLAY window there.
-            mSecondaryDisplayContext = displayContext.createWindowContext(
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null);
-        } else {
-            mSecondaryDisplayContext = displayContext;
+            Context displayContext = createDisplayContext(display);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                // On API 30+ a window context bound to the target display is required to
+                // add a TYPE_APPLICATION_OVERLAY window there.
+                mSecondaryDisplayContext = displayContext.createWindowContext(
+                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null);
+            } else {
+                mSecondaryDisplayContext = displayContext;
+            }
+            mSecondaryWindowManager = (WindowManager) mSecondaryDisplayContext.getSystemService(Context.WINDOW_SERVICE);
+
+            Log.i(TAG, "Secondary reported size = " + mSecondaryWidthPx + "x" + mSecondaryHeightPx);
+            // Use MATCH_PARENT (like the primary) rather than the reported pixel size:
+            // some external displays report a larger logical size than the panel actually
+            // shows, which makes a pixel-sized window overflow. MATCH_PARENT lets the
+            // system resolve the true drawable area; applySecondaryFit() fits within it.
+            secondaryVisibleParams = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                            | WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                    PixelFormat.TRANSPARENT
+            );
+            secondaryVisibleParams.gravity = Gravity.TOP | Gravity.START;
+            secondaryVisibleParams.x = 0;
+            secondaryVisibleParams.y = 0;
+
+            // Build the secondary overlay in code: a full-screen black container with a
+            // centered TextureView. applySecondaryFit() resizes the TextureView to the
+            // aspect-fit rectangle; the black container provides the letterbox bars.
+            FrameLayout root = new FrameLayout(mSecondaryDisplayContext);
+            root.setBackgroundColor(Color.BLACK);
+            TextureView tv = new TextureView(mSecondaryDisplayContext);
+            FrameLayout.LayoutParams tlp = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    Gravity.CENTER);
+            tv.setLayoutParams(tlp);
+            tv.setSurfaceTextureListener(mSecondarySurfaceListener);
+            root.addView(tv);
+            mSecondaryRootView = root;
+            mSecondaryTextureView = tv;
+
+            // Size the TextureView to the fitted rectangle up front (from display metrics),
+            // so its surface is created at the right size even while the window is hidden.
+            applySecondaryFit();
+
+            // Start visible if a signal is currently showing, otherwise hidden off-screen.
+            WindowManager.LayoutParams startParams = visible ? secondaryVisibleParams : invisibleParams;
+            mSecondaryWindowManager.addView(mSecondaryRootView, startParams);
+
+            mHasSecondaryDisplay = true;
+            // If the camera is already streaming, the secondary surface becoming available
+            // (via mSecondarySurfaceListener) will attach the capture target.
+        } catch (final Throwable t) {
+            Log.w(TAG, "attachSecondaryDisplay failed; continuing with primary only: " + t);
+            mHasSecondaryDisplay = false;
+            try {
+                if (mSecondaryRootView != null && mSecondaryWindowManager != null) {
+                    mSecondaryWindowManager.removeView(mSecondaryRootView);
+                }
+            } catch (final Throwable ignored) {}
+            mSecondaryRootView = null;
+            mSecondaryTextureView = null;
+            mSecondaryWindowManager = null;
+            mSecondaryDisplayContext = null;
+            secondaryVisibleParams = null;
+            mSecondaryDisplayId = -1;
         }
-        mSecondaryWindowManager = (WindowManager) mSecondaryDisplayContext.getSystemService(Context.WINDOW_SERVICE);
-
-        secondaryVisibleParams = new WindowManager.LayoutParams(
-                mSecondaryWidthPx,
-                mSecondaryHeightPx,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-                        | WindowManager.LayoutParams.FLAG_FULLSCREEN,
-                PixelFormat.TRANSPARENT
-        );
-        secondaryVisibleParams.gravity = Gravity.TOP | Gravity.START;
-        secondaryVisibleParams.x = 0;
-        secondaryVisibleParams.y = 0;
-
-        // Inflate against the secondary display's context (correct density/metrics).
-        LayoutInflater li = LayoutInflater.from(mSecondaryDisplayContext);
-        mSecondaryRootView = li.inflate(R.layout.overlay, null);
-        mSecondaryTextureView = mSecondaryRootView.findViewById(R.id.texPreview);
-        setupTextureView(mSecondaryTextureView);
-        mSecondaryTextureView.setSurfaceTextureListener(mSecondarySurfaceListener);
-
-        // Start visible if a signal is currently showing, otherwise hidden off-screen.
-        WindowManager.LayoutParams startParams = visible ? secondaryVisibleParams : invisibleParams;
-        mSecondaryWindowManager.addView(mSecondaryRootView, startParams);
-
-        mHasSecondaryDisplay = true;
-        // If the camera is already streaming, the secondary surface becoming available
-        // (via mSecondarySurfaceListener) will attach the capture target.
     }
 
     private void detachSecondaryDisplay() {
